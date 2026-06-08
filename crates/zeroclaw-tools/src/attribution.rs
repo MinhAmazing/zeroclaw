@@ -71,6 +71,7 @@ use crate::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
     SessionsListTool, SessionsSendTool,
 };
+use crate::ssh_control::SshControlTool;
 use crate::text_browser::TextBrowserTool;
 use crate::tool_search::ToolSearchTool;
 use crate::wake_on_lan::WakeOnLanTool;
@@ -140,6 +141,7 @@ tool_attribution!(SessionsCurrentTool, ToolKind::Plugin);
 tool_attribution!(SessionsHistoryTool, ToolKind::Plugin);
 tool_attribution!(SessionsListTool, ToolKind::Plugin);
 tool_attribution!(SessionsSendTool, ToolKind::Plugin);
+tool_attribution!(SshControlTool, ToolKind::Shell);
 tool_attribution!(TextBrowserTool, ToolKind::Plugin);
 tool_attribution!(ToolSearchTool, ToolKind::Search);
 tool_attribution!(WakeOnLanTool, ToolKind::Plugin);

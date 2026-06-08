@@ -29,6 +29,25 @@ fn is_valid_mac_address(mac: &str) -> bool {
     cleaned.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Generate a help message with usage examples for the wake_on_lan tool.
+fn generate_help() -> String {
+    let mut help = String::from("🔧 **Wake-on-LAN Tool** — Power on devices via network\n\n");
+    help.push_str("⚡️ **What it does:**\n");
+    help.push_str("  Sends a Wake-on-LAN magic packet to wake up a sleeping/off device on your local network.\n\n");
+    help.push_str("📝 **Usage Example:**\n");
+    help.push_str("  ```json\n");
+    help.push_str(r#"{"mac_address": "AA:BB:CC:DD:EE:FF"}"#);
+    help.push_str("\n  ```\n");
+    help.push_str("\n🔑 **Parameters:**\n");
+    help.push_str("  • `mac_address` — MAC address of the target device\n");
+    help.push_str("    Formats: AA:BB:CC:DD:EE:FF | AA-BB-CC-DD-EE-FF | AABCCDDEEFF\n\n");
+    help.push_str("⚠️ **Requirements:**\n");
+    help.push_str("  • Target device must have WoL enabled in BIOS/UEFI\n");
+    help.push_str("  • Target device must be on the same local network\n");
+    help.push_str("  • `wakeonlan` CLI tool must be installed on this machine\n");
+    help
+}
+
 #[async_trait]
 impl Tool for WakeOnLanTool {
     fn name(&self) -> &str {
@@ -37,8 +56,8 @@ impl Tool for WakeOnLanTool {
 
     fn description(&self) -> &str {
         "Send a Wake-on-LAN magic packet to power on a device by its MAC address. \
-         The target device must have WoL enabled in its BIOS/UEFI and network settings. \
-         Requires the `wakeonlan` command-line tool to be installed on the system."
+         Use 'help' for usage guide. \
+         Example: /wake_on_lan {\"mac_address\": \"AA:BB:CC:DD:EE:FF\"}"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -47,7 +66,7 @@ impl Tool for WakeOnLanTool {
             "properties": {
                 "mac_address": {
                     "type": "string",
-                    "description": "MAC address of the device to wake (e.g. 'AA:BB:CC:DD:EE:FF', 'AA-BB-CC-DD-EE-FF', or 'AABCCDDEEFF')"
+                    "description": "MAC address of the device to wake (e.g. 'AA:BB:CC:DD:EE:FF'). Use 'help' instead for usage guide."
                 }
             },
             "required": ["mac_address"]
@@ -55,7 +74,24 @@ impl Tool for WakeOnLanTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        // Enforce act policy
+        // Extract mac_address (may be "help")
+        let mac_address = args
+            .get("mac_address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                anyhow::Error::msg("Missing 'mac_address' parameter. Use 'help' for usage guide.")
+            })?;
+
+        // Handle help action — no security policy needed
+        if mac_address == "help" {
+            return Ok(ToolResult {
+                success: true,
+                output: generate_help(),
+                error: None,
+            });
+        }
+
+        // Enforce act policy for actual WoL actions
         if let Err(error) = self
             .security
             .enforce_tool_operation(ToolOperation::Act, "wake_on_lan")
@@ -66,11 +102,6 @@ impl Tool for WakeOnLanTool {
                 error: Some(error),
             });
         }
-
-        // Extract MAC address (required)
-        let mac_address = args.get("mac_address").and_then(|v| v.as_str()).ok_or_else(|| {
-            anyhow::Error::msg("Missing 'mac_address' parameter")
-        })?;
 
         // Validate MAC address format
         if !is_valid_mac_address(mac_address) {
@@ -85,11 +116,7 @@ impl Tool for WakeOnLanTool {
         }
 
         // Execute wakeonlan command
-        let output = match Command::new("wakeonlan")
-            .arg(mac_address)
-            .output()
-            .await
-        {
+        let output = match Command::new("wakeonlan").arg(mac_address).output().await {
             Ok(output) => output,
             Err(e) => {
                 return Ok(ToolResult {
@@ -106,7 +133,7 @@ impl Tool for WakeOnLanTool {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            
+
             let mut result_msg = format!("Wake-on-LAN magic packet sent to {}.", mac_address);
             if !stdout.trim().is_empty() {
                 result_msg.push_str(&format!("\nOutput: {}", stdout.trim()));
@@ -123,13 +150,16 @@ impl Tool for WakeOnLanTool {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             Ok(ToolResult {
                 success: false,
                 output: stdout.trim().to_string(),
                 error: Some(format!(
                     "wakeonlan command failed with exit code {}.\n{}",
-                    output.status.code().map_or("unknown".to_string(), |c| c.to_string()),
+                    output
+                        .status
+                        .code()
+                        .map_or("unknown".to_string(), |c| c.to_string()),
                     stderr.trim()
                 )),
             })

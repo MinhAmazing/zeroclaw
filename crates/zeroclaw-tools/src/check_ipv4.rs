@@ -23,9 +23,32 @@ fn is_valid_ipv4(ip: &str) -> bool {
     if parts.len() != 4 {
         return false;
     }
-    parts.iter().all(|p| {
-        !p.is_empty() && p.parse::<u8>().is_ok()
-    })
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.parse::<u8>().is_ok())
+}
+
+/// Generate a help message with usage examples for the check_ipv4 tool.
+fn generate_help() -> String {
+    let mut help = String::from("🔧 **Check IPv4 Tool** — Network diagnostics\n\n");
+    help.push_str("⚡️ **Modes:**\n");
+    help.push_str("  • `ping` — Test if an IP address is reachable (4 packets, 5s timeout)\n");
+    help.push_str("  • `local` — Get the local machine's IPv4 address\n");
+    help.push_str("  • `public` — Get your public IPv4 address from external service\n\n");
+    help.push_str("📝 **Usage Examples:**\n");
+    help.push_str("  ```json\n");
+    help.push_str(r#"{"mode": "ping", "target_ip": "8.8.8.8"}"#);
+    help.push_str("\n  ```\n");
+    help.push_str("  ```json\n");
+    help.push_str(r#"{"mode": "local"}"#);
+    help.push_str("\n  ```\n");
+    help.push_str("  ```json\n");
+    help.push_str(r#"{"mode": "public"}"#);
+    help.push_str("\n  ```\n");
+    help.push_str("\n🔑 **Parameters:**\n");
+    help.push_str("  • `mode` — Required: ping, local, public\n");
+    help.push_str("  • `target_ip` — Target IPv4 address (required for ping mode)\n");
+    help
 }
 
 #[async_trait]
@@ -35,10 +58,10 @@ impl Tool for CheckIpv4Tool {
     }
 
     fn description(&self) -> &str {
-        "Check IPv4 network information. Supports three modes: \
-         'ping' — check if an IP address is reachable (requires target_ip parameter). \
-         'local' — get the local machine's IPv4 address. \
-         'public' — get the public IPv4 address from an external service."
+        "Check IPv4 network information. \
+         Modes: ping (test reachability), local (get local IP), public (get public IP). \
+         Use 'help' mode for full usage guide. \
+         Example: /check_ipv4 {\"mode\": \"ping\", \"target_ip\": \"8.8.8.8\"}"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -47,8 +70,8 @@ impl Tool for CheckIpv4Tool {
             "properties": {
                 "mode": {
                     "type": "string",
-                    "enum": ["ping", "local", "public"],
-                    "description": "Check mode: 'ping' to test reachability, 'local' for local IP, 'public' for public IP"
+                    "enum": ["help", "ping", "local", "public"],
+                    "description": "Check mode: 'help' for usage guide, 'ping' to test reachability, 'local' for local IP, 'public' for public IP"
                 },
                 "target_ip": {
                     "type": "string",
@@ -60,7 +83,21 @@ impl Tool for CheckIpv4Tool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        // Enforce act policy
+        // Extract mode (required)
+        let mode = args.get("mode").and_then(|v| v.as_str()).ok_or_else(|| {
+            anyhow::Error::msg("Missing 'mode' parameter. Use 'help' for usage guide.")
+        })?;
+
+        // Handle help mode — no security policy needed
+        if mode == "help" {
+            return Ok(ToolResult {
+                success: true,
+                output: generate_help(),
+                error: None,
+            });
+        }
+
+        // Enforce act policy for actual network operations
         if let Err(error) = self
             .security
             .enforce_tool_operation(ToolOperation::Act, "check_ipv4")
@@ -72,11 +109,6 @@ impl Tool for CheckIpv4Tool {
             });
         }
 
-        // Extract mode (required)
-        let mode = args.get("mode").and_then(|v| v.as_str()).ok_or_else(|| {
-            anyhow::Error::msg("Missing 'mode' parameter")
-        })?;
-
         match mode {
             "ping" => execute_ping(args).await,
             "local" => execute_local_ip().await,
@@ -85,7 +117,7 @@ impl Tool for CheckIpv4Tool {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "Invalid mode '{}'. Supported modes: ping, local, public",
+                    "Invalid mode '{}'. Use 'help' for full usage guide.",
                     mode
                 )),
             }),
@@ -94,9 +126,12 @@ impl Tool for CheckIpv4Tool {
 }
 
 async fn execute_ping(args: serde_json::Value) -> anyhow::Result<ToolResult> {
-    let target_ip = args.get("target_ip").and_then(|v| v.as_str()).ok_or_else(|| {
-        anyhow::Error::msg("Missing 'target_ip' parameter (required for ping mode)")
-    })?;
+    let target_ip = args
+        .get("target_ip")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::Error::msg("Missing 'target_ip' parameter (required for ping mode)")
+        })?;
 
     // Validate IPv4 format
     if !is_valid_ipv4(target_ip) {
@@ -141,7 +176,9 @@ async fn execute_ping(args: serde_json::Value) -> anyhow::Result<ToolResult> {
             success: true,
             output: format!(
                 "Ping to {} successful.\n{}\n{}",
-                target_ip, stdout.trim(), summary
+                target_ip,
+                stdout.trim(),
+                summary
             ),
             error: None,
         })
@@ -152,7 +189,10 @@ async fn execute_ping(args: serde_json::Value) -> anyhow::Result<ToolResult> {
             error: Some(format!(
                 "Ping to {} failed (exit code {}). {}",
                 target_ip,
-                output.status.code().map_or("unknown".to_string(), |c| c.to_string()),
+                output
+                    .status
+                    .code()
+                    .map_or("unknown".to_string(), |c| c.to_string()),
                 stderr.trim()
             )),
         })
@@ -169,37 +209,34 @@ async fn execute_local_ip() -> anyhow::Result<ToolResult> {
             .await
             && output.status.success()
         {
-                let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !ip.is_empty() && is_valid_ipv4(&ip) {
-                    return Ok(ToolResult {
-                        success: true,
-                        output: format!("Local IPv4 address (en0): {}", ip),
-                        error: None,
-                    });
-                }
+            let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !ip.is_empty() && is_valid_ipv4(&ip) {
+                return Ok(ToolResult {
+                    success: true,
+                    output: format!("Local IPv4 address (en0): {}", ip),
+                    error: None,
+                });
             }
+        }
     }
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = Command::new("hostname")
-            .arg("-I")
-            .output()
-            .await
+        if let Ok(output) = Command::new("hostname").arg("-I").output().await
             && output.status.success()
         {
-                let ips = String::from_utf8_lossy(&output.stdout);
-                // Return first IPv4 address
-                for ip in ips.trim().split_whitespace() {
-                    if is_valid_ipv4(ip) {
-                        return Ok(ToolResult {
-                            success: true,
-                            output: format!("Local IPv4 address: {}", ip),
-                            error: None,
-                        });
-                    }
+            let ips = String::from_utf8_lossy(&output.stdout);
+            // Return first IPv4 address
+            for ip in ips.trim().split_whitespace() {
+                if is_valid_ipv4(ip) {
+                    return Ok(ToolResult {
+                        success: true,
+                        output: format!("Local IPv4 address: {}", ip),
+                        error: None,
+                    });
                 }
             }
+        }
     }
 
     // Fallback: try `ip route` on Linux or `ifconfig` on macOS
@@ -235,19 +272,11 @@ async fn execute_local_ip() -> anyhow::Result<ToolResult> {
 
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = Command::new("ifconfig")
-            .arg("en0")
-            .output()
-            .await
-        {
+        if let Ok(output) = Command::new("ifconfig").arg("en0").output().await {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 if line.contains("inet ") {
-                    let ip: String = line
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap_or("")
-                        .to_string();
+                    let ip: String = line.split_whitespace().nth(1).unwrap_or("").to_string();
                     if is_valid_ipv4(&ip) {
                         return Ok(ToolResult {
                             success: true,

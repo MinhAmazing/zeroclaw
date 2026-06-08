@@ -111,6 +111,7 @@ pub use zeroclaw_tools::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
     SessionsListTool, SessionsSendTool,
 };
+pub use zeroclaw_tools::ssh_control::SshControlTool;
 pub use zeroclaw_tools::text_browser::TextBrowserTool;
 pub use zeroclaw_tools::tool_search::ToolSearchTool;
 pub use zeroclaw_tools::wake_on_lan::WakeOnLanTool;
@@ -560,6 +561,7 @@ pub fn all_tools_with_runtime(
         )),
         Arc::new(CalculatorTool::new()),
         Arc::new(CheckIpv4Tool::new(security.clone())),
+        Arc::new(SshControlTool::new(security.clone())),
         Arc::new(WakeOnLanTool::new(security.clone())),
         Arc::new(WeatherTool::new()),
         Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),

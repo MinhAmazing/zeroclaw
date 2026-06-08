@@ -68,6 +68,7 @@ pub mod report_template_tool;
 pub mod report_templates;
 pub mod screenshot;
 pub mod sessions;
+pub mod ssh_control;
 pub mod text_browser;
 pub mod tool_search;
 pub mod wake_on_lan;
