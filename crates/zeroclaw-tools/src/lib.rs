@@ -11,6 +11,7 @@ pub mod browser_delegate;
 pub mod browser_open;
 pub mod calculator;
 pub mod canvas;
+pub mod check_ipv4;
 pub mod claude_code;
 pub mod claude_code_runner;
 pub mod cli_discovery;
