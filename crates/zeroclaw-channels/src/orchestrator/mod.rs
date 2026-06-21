@@ -295,6 +295,25 @@ enum ChannelRuntimeCommand {
     SetModel(String),
     ShowConfig,
     NewSession,
+    /// `/wake_on_lan <mac>` — send a Wake-on-LAN magic packet locally
+    /// (runs the `wake_on_lan` tool directly, never the LLM). Empty MAC
+    /// renders the tool's help.
+    WakeOnLan(String),
+    /// `/check_ipv4 <mode> [target_ip]` — IPv4 diagnostics run locally via
+    /// the `check_ipv4` tool. `mode` defaults to `help` when omitted.
+    CheckIpv4 {
+        mode: String,
+        target_ip: Option<String>,
+    },
+    /// `/ssh_control <action> [user@host] [command...]` — remote machine
+    /// control run locally via the `ssh_control` tool. `action` defaults to
+    /// `help` when omitted.
+    SshControl {
+        action: String,
+        host: Option<String>,
+        user: Option<String>,
+        command: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1000,6 +1019,58 @@ fn parse_runtime_command(channel_name: &str, content: &str) -> Option<ChannelRun
     match base_command.as_str() {
         // `/new` is available on every channel — no model-switch gate.
         "/new" => Some(ChannelRuntimeCommand::NewSession),
+        // Device/network commands run locally (never the LLM) and are
+        // available on every channel.
+        "/wake_on_lan" | "/wol" => {
+            // Remaining tokens are the MAC address (MACs carry no spaces, but
+            // join defensively). Empty -> tool renders its help.
+            let mac = parts.collect::<Vec<_>>().join(" ").trim().to_string();
+            Some(ChannelRuntimeCommand::WakeOnLan(mac))
+        }
+        "/check_ipv4" | "/get_ipv4" | "/ipv4" => {
+            let mode = parts
+                .next()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "help".to_string());
+            let target_ip = parts.next().map(|s| s.to_string());
+            Some(ChannelRuntimeCommand::CheckIpv4 { mode, target_ip })
+        }
+        "/ssh_control" | "/ssh" => {
+            let action = parts
+                .next()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "help".to_string());
+            if action.eq_ignore_ascii_case("help") {
+                return Some(ChannelRuntimeCommand::SshControl {
+                    action: "help".to_string(),
+                    host: None,
+                    user: None,
+                    command: None,
+                });
+            }
+            // Next token is the target as `user@host` (or a bare host).
+            let (user, host) = match parts.next() {
+                Some(target) => {
+                    let mut split = target.splitn(2, '@');
+                    let first = split.next().unwrap_or("").to_string();
+                    match split.next() {
+                        Some(rest) => (Some(first), Some(rest.to_string())),
+                        // No '@' — treat the lone token as the host.
+                        None => (None, Some(first)),
+                    }
+                }
+                None => (None, None),
+            };
+            // Anything left is the custom command (for `action == "custom"`).
+            let rest = parts.collect::<Vec<_>>().join(" ").trim().to_string();
+            let command = (!rest.is_empty()).then_some(rest);
+            Some(ChannelRuntimeCommand::SshControl {
+                action,
+                host,
+                user,
+                command,
+            })
+        }
         // Model/model_provider switching is channel-gated.
         "/models" if supports_runtime_model_switch(channel_name) => {
             if let Some(model_provider) = parts.next() {
@@ -2095,6 +2166,37 @@ fn build_config_block_kit(
     blocks.to_string()
 }
 
+/// Run an already-registered built-in tool directly (no LLM) and render its
+/// result as a user-facing string. Looks the tool up by name in the runtime
+/// tool registry, so it honors the same security-policy filtering applied when
+/// the registry was built — a policy-disabled tool is simply "not available".
+async fn run_builtin_runtime_tool(
+    ctx: &ChannelRuntimeContext,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> String {
+    let Some(tool) = ctx.tools_registry.iter().find(|t| t.name() == tool_name) else {
+        return format!(
+            "Tool `{tool_name}` is not available (it may be disabled by the security policy)."
+        );
+    };
+    match tool.execute(args).await {
+        Ok(result) if result.success => {
+            if result.output.trim().is_empty() {
+                "Done.".to_string()
+            } else {
+                result.output
+            }
+        }
+        Ok(result) => match result.error {
+            Some(err) if !err.is_empty() => err,
+            _ if !result.output.is_empty() => result.output,
+            _ => format!("`{tool_name}` failed."),
+        },
+        Err(err) => format!("`{tool_name}` error: {err}"),
+    }
+}
+
 async fn handle_runtime_command_if_needed(
     ctx: &ChannelRuntimeContext,
     msg: &zeroclaw_api::channel::ChannelMessage,
@@ -2210,6 +2312,40 @@ async fn handle_runtime_command_if_needed(
             }
             mark_sender_for_new_session(ctx, &sender_key);
             "Conversation history cleared. Starting fresh.".to_string()
+        }
+        ChannelRuntimeCommand::WakeOnLan(mac) => {
+            let mac_address = if mac.is_empty() { "help".to_string() } else { mac };
+            run_builtin_runtime_tool(
+                ctx,
+                "wake_on_lan",
+                serde_json::json!({ "mac_address": mac_address }),
+            )
+            .await
+        }
+        ChannelRuntimeCommand::CheckIpv4 { mode, target_ip } => {
+            let mut args = serde_json::json!({ "mode": mode });
+            if let Some(ip) = target_ip {
+                args["target_ip"] = serde_json::json!(ip);
+            }
+            run_builtin_runtime_tool(ctx, "check_ipv4", args).await
+        }
+        ChannelRuntimeCommand::SshControl {
+            action,
+            host,
+            user,
+            command,
+        } => {
+            let mut args = serde_json::json!({ "action": action });
+            if let Some(h) = host {
+                args["host"] = serde_json::json!(h);
+            }
+            if let Some(u) = user {
+                args["user"] = serde_json::json!(u);
+            }
+            if let Some(c) = command {
+                args["command"] = serde_json::json!(c);
+            }
+            run_builtin_runtime_tool(ctx, "ssh_control", args).await
         }
     };
 
@@ -14527,6 +14663,85 @@ BTC is currently around $65,000 based on latest tool output."#
         assert_eq!(
             parse_runtime_command("wecom_ws", "/model qwen-max"),
             Some(ChannelRuntimeCommand::SetModel("qwen-max".into()))
+        );
+    }
+
+    /// `/wake_on_lan`, `/check_ipv4`, and `/ssh_control` must parse to local
+    /// runtime commands on every channel so they bypass the LLM entirely.
+    #[test]
+    fn parse_runtime_command_parses_wake_on_lan() {
+        assert_eq!(
+            parse_runtime_command("telegram", "/wake_on_lan FC:34:97:E0:29:59"),
+            Some(ChannelRuntimeCommand::WakeOnLan("FC:34:97:E0:29:59".into()))
+        );
+        // Alias + case-insensitive command token.
+        assert_eq!(
+            parse_runtime_command("discord", "/WOL aa-bb-cc-dd-ee-ff"),
+            Some(ChannelRuntimeCommand::WakeOnLan("aa-bb-cc-dd-ee-ff".into()))
+        );
+        // No argument -> empty MAC (handler renders tool help).
+        assert_eq!(
+            parse_runtime_command("telegram", "/wake_on_lan"),
+            Some(ChannelRuntimeCommand::WakeOnLan(String::new()))
+        );
+    }
+
+    #[test]
+    fn parse_runtime_command_parses_check_ipv4() {
+        assert_eq!(
+            parse_runtime_command("telegram", "/check_ipv4 ping 8.8.8.8"),
+            Some(ChannelRuntimeCommand::CheckIpv4 {
+                mode: "ping".into(),
+                target_ip: Some("8.8.8.8".into()),
+            })
+        );
+        assert_eq!(
+            parse_runtime_command("telegram", "/get_ipv4 public"),
+            Some(ChannelRuntimeCommand::CheckIpv4 {
+                mode: "public".into(),
+                target_ip: None,
+            })
+        );
+        // No argument -> defaults to help mode.
+        assert_eq!(
+            parse_runtime_command("telegram", "/ipv4"),
+            Some(ChannelRuntimeCommand::CheckIpv4 {
+                mode: "help".into(),
+                target_ip: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_runtime_command_parses_ssh_control() {
+        assert_eq!(
+            parse_runtime_command("telegram", "/ssh_control shutdown hello@192.168.2.168"),
+            Some(ChannelRuntimeCommand::SshControl {
+                action: "shutdown".into(),
+                host: Some("192.168.2.168".into()),
+                user: Some("hello".into()),
+                command: None,
+            })
+        );
+        // Custom action keeps the trailing command intact.
+        assert_eq!(
+            parse_runtime_command("telegram", "/ssh custom hello@192.168.2.168 ipconfig /all"),
+            Some(ChannelRuntimeCommand::SshControl {
+                action: "custom".into(),
+                host: Some("192.168.2.168".into()),
+                user: Some("hello".into()),
+                command: Some("ipconfig /all".into()),
+            })
+        );
+        // No argument -> help action with no target.
+        assert_eq!(
+            parse_runtime_command("telegram", "/ssh_control"),
+            Some(ChannelRuntimeCommand::SshControl {
+                action: "help".into(),
+                host: None,
+                user: None,
+                command: None,
+            })
         );
     }
 
